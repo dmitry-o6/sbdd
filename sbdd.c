@@ -37,44 +37,36 @@ struct sbdd
 static struct sbdd __sbdd = { 0 };
 static char *dev_path = "/dev/sdb";
 
-static sector_t sbdd_xfer(struct bio_vec* bvec, sector_t pos, int dir)
+/* I/O completion method. */
+static void sbdd_bio_endio(struct bio *bio_clone)
 {
-    void *buff = kmap_atomic(bvec->bv_page) + bvec->bv_offset;
-    sector_t len = bvec->bv_len >> SBDD_SECTOR_SHIFT;
-    size_t offset;
-    size_t nbytes;
-
-    if (pos + len > __sbdd.capacity)
-        len = __sbdd.capacity - pos;
-
-    offset = pos << SBDD_SECTOR_SHIFT;
-    nbytes = len << SBDD_SECTOR_SHIFT;
-
-    spin_lock(&__sbdd.datalock);
-
-    if (dir)
-        memcpy(__sbdd.data + offset, buff, nbytes);
+    if (bio_clone->bi_status)
+        bio_io_error(bio_clone->bi_private);
     else
-        memcpy(buff, __sbdd.data + offset, nbytes);
+        bio_endio(bio_clone->bi_private);
 
-    spin_unlock(&__sbdd.datalock);
+    bio_put(bio_clone);
 
-    pr_debug("pos=%6llu len=%4llu %s\n", pos, len, dir ? "written" : "read");
-
-    kunmap_atomic(buff);
-    return len;
+    if (atomic_dec_and_test(&__sbdd.refs_cnt))
+        wake_up(&__sbdd.exitwait);
 }
 
+/*
+Submit an I/O request, which is represented by a struct bio structure, to the associated device.
+*/
 static void sbdd_submit_bio(struct bio *bio)
 {
-    struct bvec_iter iter;
-    struct bio_vec bvec;
-    int dir;
-    sector_t pos;
+    struct bio *bio_clone = NULL;
 
     bio = bio_split_to_limits(bio);
     if (!bio)
         return;
+
+    bio_clone = bio_alloc_clone(__sbdd.bd_handle->bdev, bio, GFP_KERNEL, &fs_bio_set);
+    if (!bio_clone) {
+        bio_io_error(bio);
+        return;
+    }
 
     if (atomic_read(&__sbdd.deleting)) {
         bio_io_error(bio);
@@ -86,15 +78,9 @@ static void sbdd_submit_bio(struct bio *bio)
         return;
     }
 
-    dir = bio_data_dir(bio);
-    pos = bio->bi_iter.bi_sector;
-    bio_for_each_segment(bvec, bio, iter)
-        pos += sbdd_xfer(&bvec, pos, dir);
-
-    bio_endio(bio);
-
-    if (atomic_dec_and_test(&__sbdd.refs_cnt))
-        wake_up(&__sbdd.exitwait);
+    bio_clone->bi_private = bio;
+    bio_clone->bi_end_io = sbdd_bio_endio;
+    submit_bio(bio_clone);
 }
 
 /*
