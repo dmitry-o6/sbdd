@@ -201,8 +201,8 @@ module_init(sbdd_init);
 /* Called on module unloading. Unloading module is not allowed without it. */
 module_exit(sbdd_exit);
 
-/* Set desired capacity with insmod */
-module_param_named(capacity_mib, __sbdd_capacity_mib, ulong, S_IRUGO);
+/* Set path to target blk device. */
+module_param_named(blk_dev_path, dev_path, charp, S_IRUGO);
 
 /* Note for the kernel: a free license module. A warning will be outputted without it. */
 MODULE_LICENSE("GPL");
