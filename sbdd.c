@@ -24,18 +24,18 @@
 #define SBDD_MIB_SECTORS        (1 << (20 - SBDD_SECTOR_SHIFT))
 #define SBDD_NAME               "sbdd"
 
-struct sbdd {
-    wait_queue_head_t       exitwait;
-    spinlock_t              datalock;
-    atomic_t                deleting;
-    atomic_t                refs_cnt;
-    sector_t                capacity;
-    u8                      *data;
-    struct gendisk          *gd;
+struct sbdd
+{
+    wait_queue_head_t exitwait;
+    atomic_t deleting;
+    atomic_t refs_cnt;
+    sector_t capacity;
+    struct gendisk *gd;
+    struct bdev_handle *bd_handle;
 };
 
-static struct sbdd              __sbdd = { 0 };
-static unsigned long            __sbdd_capacity_mib = 100;
+static struct sbdd __sbdd = { 0 };
+static char *dev_path = "/dev/sdb";
 
 static sector_t sbdd_xfer(struct bio_vec* bvec, sector_t pos, int dir)
 {
@@ -108,32 +108,33 @@ static struct block_device_operations const __sbdd_bdev_ops = {
 
 static int sbdd_create(void)
 {
-    /* Configure queue */
-    struct queue_limits limits = {
-        .logical_block_size = SBDD_SECTOR_SIZE,
-        .physical_block_size = SBDD_SECTOR_SIZE,
-    };
     int ret = 0;
 
-    pr_info("allocating data\n");
-    __sbdd.capacity = (sector_t)__sbdd_capacity_mib * SBDD_MIB_SECTORS;
-    __sbdd.data = vzalloc(__sbdd.capacity << SBDD_SECTOR_SHIFT);
-    if (!__sbdd.data) {
-        pr_err("unable to alloc data\n");
-        return -ENOMEM;
+    pr_info("opening target blk device\n");
+    __sbdd.bd_handle = bdev_open_by_path(dev_path, BLK_OPEN_READ | BLK_OPEN_WRITE, NULL, NULL);
+    if (IS_ERR(__sbdd.bd_handle))
+    {
+        pr_err("bdev_open_by_path() failed to open %s\n", dev_path);
+        return -1;
     }
 
-    spin_lock_init(&__sbdd.datalock);
+    pr_info("setting capacity\n");
+    __sbdd.capacity = get_capacity(__sbdd.bd_handle->bdev->bd_disk);
+
     init_waitqueue_head(&__sbdd.exitwait);
 
     pr_info("allocating disk\n");
-    __sbdd.gd = blk_alloc_disk(&limits, NUMA_NO_NODE);
+    __sbdd.gd = blk_alloc_disk(NUMA_NO_NODE);
     if (IS_ERR(__sbdd.gd)) {
         pr_err("blk_alloc_disk() failed\n");
         ret = PTR_ERR(__sbdd.gd);
         __sbdd.gd = NULL;
         return ret;
     }
+
+    /* Configure queue */
+    blk_queue_logical_block_size(__sbdd.gd->queue, SBDD_SECTOR_SIZE);
+    blk_queue_physical_block_size(__sbdd.gd->queue, SBDD_SECTOR_SIZE);
 
     /* Configure gendisk */
     __sbdd.gd->fops = &__sbdd_bdev_ops;
@@ -168,9 +169,9 @@ static void sbdd_delete(void)
         put_disk(__sbdd.gd);
     }
 
-    if (__sbdd.data) {
-        pr_info("freeing data\n");
-        vfree(__sbdd.data);
+    if (__sbdd.bd_handle) {
+        pr_info("releasing blk device handle\n");
+        bdev_release(__sbdd.bd_handle);
     }
 }
 
